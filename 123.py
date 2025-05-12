@@ -75,45 +75,6 @@ async def send_message_to_topic(task_data: Dict) -> bool:
 
     return success
 
-# Запуск задачи
-async def run_task(task_id: str, task_data: Dict, bot: Bot) -> None:
-    config = load_config()
-    owner_id = config.get('user_id')
-    notifications_enabled = config.get('notifications_enabled', True)  # По умолчанию включены
-
-    while task_id in active_tasks and active_tasks[task_id]:
-        try:
-            success = await send_message_to_topic(task_data)
-
-            # Отправляем уведомление владельцу, если уведомления включены
-            if owner_id and notifications_enabled:
-                if success:
-                    await bot.send_message(
-                        owner_id,
-                        f"✅ Сообщение успешно отправлено в группу @{task_data['group_username']}, "
-                        f"топик '{task_data.get('topic_name', 'Нет топика')}'\n"
-                        f"⏱ Следующая отправка через {task_data['interval']} сек."
-                    )
-                else:
-                    await bot.send_message(
-                        owner_id,
-                        f"❌ Не удалось отправить сообщение в группу @{task_data['group_username']}, "
-                        f"топик '{task_data.get('topic_name', 'Нет топика')}'\n"
-                        f"⏱ Следующая попытка через {task_data['interval']} сек."
-                    )
-
-            # Обновляем конфигурацию с временем последней отправки
-            config['tasks'][task_id]['last_posted'] = task_data['last_posted']
-            save_config(config)
-
-            # Ждем указанное время перед следующей отправкой
-            await asyncio.sleep(task_data['interval'])
-
-        except Exception as e:
-            logging.error(f"Ошибка в задаче {task_id}: {str(e)}")
-            # При ошибке ждем 30 секунд и пробуем снова
-            await asyncio.sleep(30)
-
 
 # Создание клавиатуры главного меню
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
