@@ -206,130 +206,90 @@ async def find_topics(group_username: str) -> Tuple[List[Dict], str]:
 async def send_message_to_topic(task_data: Dict) -> bool:
     client = await create_telethon_client()
     success = False
-
+    
     try:
         # Получаем информацию о чате
         entity = await client.get_entity(f"@{task_data['group_username']}")
-
+        
         # Отправка сообщения с фото, если указан путь
         if task_data.get('photo_path') and os.path.exists(task_data['photo_path']):
-            # Если топик указан и он не равен 0, отправляем в топик
-            if task_data.get('topic_id', 0) != 0:
-                await client.send_file(
-                    entity,
-                    task_data['photo_path'],
-                    caption=task_data['message'],
-                    reply_to=task_data['topic_id'],
-                    parse_mode='html'
-                )
-            else:
-                # Отправка в обычную группу без топика
-                await client.send_file(
-                    entity,
-                    task_data['photo_path'],
-                    caption=task_data['message'],
-                    parse_mode='html'
-                )
+            await client.send_file(
+                entity,
+                task_data['photo_path'],
+                caption=task_data['message'],
+                reply_to=task_data['topic_id'],
+                parse_mode='html'
+            )
         else:
             # Отправка только текста
-            if task_data.get('topic_id', 0) != 0:
-                await client.send_message(
-                    entity,
-                    task_data['message'],
-                    reply_to=task_data['topic_id'],
-                    parse_mode='html'
-                )
-            else:
-                # Отправка в обычную группу без топика
-                await client.send_message(
-                    entity,
-                    task_data['message'],
-                    parse_mode='html'
-                )
-
+            await client.send_message(
+                entity,
+                task_data['message'],
+                reply_to=task_data['topic_id'],
+                parse_mode='html'
+            )
+        
         # Обновляем время последней отправки
         task_data['last_posted'] = datetime.now().isoformat()
         success = True
-
+        
     except Exception as e:
         logging.error(f"Ошибка при отправке сообщения: {str(e)}")
     finally:
         # Закрываем соединение
         if client.is_connected():
             await client.disconnect()
-
+    
     return success
 
 # Запуск задачи
 async def run_task(task_id: str, task_data: Dict, bot: Bot) -> None:
     config = load_config()
     owner_id = config.get('user_id')
-    notifications_enabled = config.get('notifications_enabled', True)  # По умолчанию включены
-
+    
     while task_id in active_tasks and active_tasks[task_id]:
         try:
             success = await send_message_to_topic(task_data)
-
-            # Отправляем уведомление владельцу, если уведомления включены
-            if owner_id and notifications_enabled:
+            
+            # Отправляем уведомление владельцу
+            if owner_id:
                 if success:
                     await bot.send_message(
                         owner_id,
                         f"✅ Сообщение успешно отправлено в группу @{task_data['group_username']}, "
-                        f"топик '{task_data.get('topic_name', 'Нет топика')}'\n"
+                        f"топик '{task_data['topic_name']}'\n"
                         f"⏱ Следующая отправка через {task_data['interval']} сек."
                     )
                 else:
                     await bot.send_message(
                         owner_id,
                         f"❌ Не удалось отправить сообщение в группу @{task_data['group_username']}, "
-                        f"топик '{task_data.get('topic_name', 'Нет топика')}'\n"
+                        f"топик '{task_data['topic_name']}'\n"
                         f"⏱ Следующая попытка через {task_data['interval']} сек."
                     )
-
+            
             # Обновляем конфигурацию с временем последней отправки
             config['tasks'][task_id]['last_posted'] = task_data['last_posted']
             save_config(config)
-
+            
             # Ждем указанное время перед следующей отправкой
             await asyncio.sleep(task_data['interval'])
-
+            
         except Exception as e:
             logging.error(f"Ошибка в задаче {task_id}: {str(e)}")
             # При ошибке ждем 30 секунд и пробуем снова
             await asyncio.sleep(30)
-
 
 # Создание клавиатуры главного меню
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         InlineKeyboardButton("➕ Добавить задачу", callback_data="add_task"),
-        InlineKeyboardButton("📋 Мои задачи", callback_data="list_tasks")
-    )
-    keyboard.add(
-        InlineKeyboardButton("▶️ Включить все", callback_data="start_all_tasks"),
-        InlineKeyboardButton("⏹ Отключить все", callback_data="stop_all_tasks")
-    )
-    keyboard.add(
+        InlineKeyboardButton("📋 Мои задачи", callback_data="list_tasks"),
         InlineKeyboardButton("📊 Статус задач", callback_data="task_status"),
-        InlineKeyboardButton("🔔 Уведомления", callback_data="toggle_notifications")
-    )
-    keyboard.add(
         InlineKeyboardButton("ℹ️ Помощь", callback_data="help")
     )
     return keyboard
-
-# 2. Добавляем функцию для управления уведомлениями в конфигурации
-
-def toggle_notifications_status(config: Dict) -> Dict:
-    """Изменяет статус уведомлений в конфигурации"""
-    if 'notifications_enabled' not in config:
-        config['notifications_enabled'] = False
-    else:
-        config['notifications_enabled'] = not config['notifications_enabled']
-    save_config(config)
-    return config
 
 # Создание клавиатуры для выбора топика
 def get_topics_keyboard(topics: List[Dict]) -> InlineKeyboardMarkup:
@@ -372,7 +332,6 @@ def get_task_control_keyboard(task_id: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🔙 Назад", callback_data="list_tasks")
     )
     return keyboard
-
 
 # Запускаем бота
 async def main():
@@ -456,33 +415,7 @@ async def main():
                 "Действие отменено. Вы вернулись в главное меню:",
                 reply_markup=get_main_menu_keyboard()
             )
-
-    @dp.callback_query_handler(lambda c: c.data.startswith('use_without_topics_'), state='*')
-    async def process_use_without_topics(callback_query: types.CallbackQuery, state: FSMContext):
-        await bot.answer_callback_query(callback_query.id)
-
-        # Получаем имя группы из callback_data
-        group_username = callback_query.data.replace('use_without_topics_', '')
-
-        # Сохраняем информацию о группе в состоянии
-        await state.update_data(group_username=group_username, topic_id=0, topic_name="Нет топика")
-
-        # Переходим к вводу сообщения
-        await PosterStates.entering_message.set()
-        await bot.send_message(
-            callback_query.from_user.id,
-            f"Вы выбрали отправку сообщений в группу @{group_username} без указания топика.\n\n"
-            f"Введите текст сообщения, которое будет отправляться в эту группу.\n\n"
-            f"Можно использовать HTML-форматирование:\n"
-            f"<b>жирный</b>\n"
-            f"<i>курсив</i>\n"
-            f"<u>подчеркнутый</u>\n"
-            f"<a href='http://example.com'>ссылка</a>\n"
-            f"<code>код</code>\n"
-            f"<pre>блок кода</pre>\n"
-            f"<blockquote>цитата</blockquote>"
-        )
-
+    
     # Обработчик кнопки "Добавить задачу"
     @dp.callback_query_handler(lambda c: c.data == 'add_task', state=PosterStates.main_menu)
     async def process_add_task(callback_query: types.CallbackQuery, state: FSMContext):
@@ -493,153 +426,43 @@ async def main():
             "Введите имя группы (без @, например: gifts_buy)\n"
             "Важно: вы должны быть участником этой группы."
         )
-
-    @dp.callback_query_handler(lambda c: c.data == 'start_all_tasks', state='*')
-    async def process_start_all_tasks(callback_query: types.CallbackQuery, state: FSMContext):
-        await bot.answer_callback_query(callback_query.id)
-        config = load_config()
-        tasks = config.get('tasks', {})
-
-        if not tasks:
-            await bot.send_message(
-                callback_query.from_user.id,
-                "У вас пока нет задач. Добавьте новую задачу с помощью кнопки '➕ Добавить задачу'.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-
-        started_count = 0
-        already_running_count = 0
-
-        for task_id, task_data in tasks.items():
-            if task_id in active_tasks and active_tasks[task_id]:
-                already_running_count += 1
-                continue
-
-            config['tasks'][task_id]['active'] = True
-            active_tasks[task_id] = True
-
-            # Добавляем задержку между запусками задач
-            if started_count > 0:
-                await asyncio.sleep(2)  # 2 секунды задержки
-
-            asyncio.create_task(run_task(task_id, task_data, bot))
-            started_count += 1
-
-        save_config(config)
-
-        await bot.send_message(
-            callback_query.from_user.id,
-            f"🚀 Задачи активированы!\n\n"
-            f"✅ Запущено новых задач: {started_count}\n"
-            f"ℹ️ Уже работающих задач: {already_running_count}",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-    @dp.callback_query_handler(lambda c: c.data == 'stop_all_tasks', state='*')
-    async def process_stop_all_tasks(callback_query: types.CallbackQuery, state: FSMContext):
-        await bot.answer_callback_query(callback_query.id)
-
-        # Загружаем конфигурацию
-        config = load_config()
-        tasks = config.get('tasks', {})
-
-        if not tasks:
-            await bot.send_message(
-                callback_query.from_user.id,
-                "У вас пока нет задач. Добавьте новую задачу с помощью кнопки '➕ Добавить задачу'.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-
-        # Счетчики для отчета
-        stopped_count = 0
-        already_stopped_count = 0
-
-        # Останавливаем все задачи
-        for task_id, task_data in tasks.items():
-            # Если задача уже остановлена, пропускаем
-            if task_id not in active_tasks or not active_tasks[task_id]:
-                already_stopped_count += 1
-                continue
-
-            # Обновляем статус задачи в конфигурации
-            config['tasks'][task_id]['active'] = False
-
-            # Удаляем задачу из списка активных
-            active_tasks[task_id] = False
-            stopped_count += 1
-
-        # Сохраняем конфигурацию
-        save_config(config)
-
-        # Отправляем отчет
-        await bot.send_message(
-            callback_query.from_user.id,
-            f"⏹ Задачи остановлены!\n\n"
-            f"✅ Остановлено задач: {stopped_count}\n"
-            f"ℹ️ Уже остановленных задач: {already_stopped_count}",
-            reply_markup=get_main_menu_keyboard()
-        )
-
-    @dp.callback_query_handler(lambda c: c.data == 'toggle_notifications', state='*')
-    async def process_toggle_notifications(callback_query: types.CallbackQuery, state: FSMContext):
-        await bot.answer_callback_query(callback_query.id)
-
-        # Загружаем конфигурацию и меняем статус уведомлений
-        config = load_config()
-        config = toggle_notifications_status(config)
-
-        # Получаем текущий статус уведомлений
-        notifications_enabled = config.get('notifications_enabled', True)
-        status_text = "включены" if notifications_enabled else "отключены"
-
-        # Отправляем сообщение о текущем статусе
-        await bot.send_message(
-            callback_query.from_user.id,
-            f"🔔 Уведомления {status_text}.\n\n"
-            f"{'Теперь вы будете получать уведомления о работе бота.' if notifications_enabled else 'Теперь вы не будете получать уведомления о работе бота.'}",
-            reply_markup=get_main_menu_keyboard()
-        )
-
+    
     # Обработчик ввода группы
     @dp.message_handler(state=PosterStates.waiting_for_group_link)
     async def process_group_link(message: types.Message, state: FSMContext):
         group_username = message.text.strip()
-
+        
         # Убираем @ в начале, если есть
         if group_username.startswith('@'):
             group_username = group_username[1:]
-
+        
         # Проверяем, что имя группы не пустое
         if not group_username:
             await message.answer("Имя группы не может быть пустым. Пожалуйста, введите правильное имя группы:")
             return
-
+        
         await message.answer(f"Ищем топики в группе @{group_username}...\nЭто может занять некоторое время.")
-
+        
         # Получаем список топиков
         topics, error = await find_topics(group_username)
-
-        if error or not topics:
-            # Предлагаем отправку сообщений в группу без топиков
-            keyboard = InlineKeyboardMarkup(row_width=2)
-            keyboard.add(
-                InlineKeyboardButton("✅ Да, использовать без топиков",
-                                     callback_data=f"use_without_topics_{group_username}"),
-                InlineKeyboardButton("❌ Нет, отмена", callback_data="back_to_main")
-            )
-
+        
+        if error:
+            await message.answer(f"Ошибка: {error}\nПожалуйста, проверьте имя группы и попробуйте снова.")
+            return
+        
+        if not topics:
             await message.answer(
-                f"В группе @{group_username} не найдено доступных топиков или произошла ошибка: {error}\n\n"
-                f"Хотите использовать эту группу без указания топика?",
-                reply_markup=keyboard
+                "В группе не найдено доступных топиков. Проверьте, что:\n"
+                "1. Вы указали правильное имя группы\n"
+                "2. Вы являетесь участником группы\n"
+                "3. Группа настроена как форум с топиками\n\n"
+                "Введите другое имя группы или /cancel для отмены:"
             )
             return
-
+        
         # Сохраняем информацию о группе в состоянии
         await state.update_data(group_username=group_username)
-
+        
         # Показываем список топиков
         await PosterStates.selecting_topic.set()
         await message.answer(
