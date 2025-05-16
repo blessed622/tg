@@ -288,7 +288,6 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard.add(
         InlineKeyboardButton("➕ Добавить задачу", callback_data="add_task"),
         InlineKeyboardButton("📋 Мои задачи", callback_data="list_tasks"),
-        InlineKeyboardButton("📊 Статус задач", callback_data="task_status"),
         InlineKeyboardButton("▶️ Включить все", callback_data="start_all_tasks"),
         InlineKeyboardButton("⏹ Выключить все", callback_data="stop_all_tasks"),
         InlineKeyboardButton("ℹ️ Помощь", callback_data="help")
@@ -1090,48 +1089,6 @@ async def main():
             reply_markup=get_task_control_keyboard(task_id)
         )
     
-    # Обработчик кнопки "Статус задач"
-    @dp.callback_query_handler(lambda c: c.data == 'task_status', state='*')
-    async def process_task_status(callback_query: types.CallbackQuery, state: FSMContext):
-        await bot.answer_callback_query(callback_query.id)
-        
-        # Загружаем конфигурацию
-        config = load_config()
-        tasks = config.get('tasks', {})
-        
-        if not tasks:
-            await bot.send_message(
-                callback_query.from_user.id,
-                "У вас пока нет задач. Добавьте новую задачу с помощью кнопки '➕ Добавить задачу'.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-        
-        # Формируем сообщение со статусом всех задач
-        status_message = "<b>📊 Статус задач:</b>\n\n"
-
-        for task_id, task_data in tasks.items():
-            is_active = task_id in active_tasks and active_tasks[task_id]
-            status = "✅ Активна" if is_active else "❌ Остановлена"
-
-            status_message += (
-                f"<b>{status}</b>\n"
-                f"👥 Группа: @{task_data['group_username']}\n"
-                f"📌 Топик: {task_data['topic_name']}\n"
-                f"⏱ Интервал: {task_data['interval']} сек.\n\n"
-            )
-        
-        # Добавляем кнопку возврата в главное меню
-        keyboard = InlineKeyboardMarkup()
-        keyboard.add(InlineKeyboardButton("🔙 Назад", callback_data="back_to_main"))
-        
-        await bot.send_message(
-            callback_query.from_user.id,
-            status_message,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML
-        )
-    
     # Обработчик кнопки "Помощь"
     @dp.callback_query_handler(lambda c: c.data == 'help', state='*')
     async def process_help(callback_query: types.CallbackQuery, state: FSMContext):
@@ -1156,8 +1113,7 @@ async def main():
             "6. Укажите интервал отправки в секундах\n"
             "7. Подтвердите создание задачи\n\n"
             "<b>Управление задачами:</b>\n"
-            "• В разделе 'Мои задачи' вы можете запускать, останавливать, редактировать или удалять задачи\n"
-            "• В разделе 'Статус задач' вы можете видеть текущее состояние всех задач\n\n"
+            "• В разделе 'Мои задачи' вы можете запускать, останавливать, редактировать или удалять задачи\n\n"
             "<b>Важно:</b>\n"
             "• У вас должны быть соответствующие права для отправки сообщений в указанные группы\n"
             "• Клиент Telegram использует указанный при настройке номер телефона\n",
