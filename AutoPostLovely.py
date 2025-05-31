@@ -4,6 +4,7 @@ import io
 import logging
 import asyncio
 import json
+import time  
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 import aiogram
@@ -16,8 +17,9 @@ from telethon import TelegramClient, events
 from telethon.tl.functions.channels import GetForumTopicsRequest
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.errors import ChatAdminRequiredError, ChannelPrivateError
-from telethon.sessions import StringSession
+from telethon.sessions import StringSession, SQLiteSession
 
+SESSION_FILE = "telegram_session"
 MAX_CLIENTS = 5  # Количество клиентов в пуле
 telethon_clients = {}  # Словарь для хранения клиентов
 client_semaphore = asyncio.Semaphore(MAX_CLIENTS)  # Ограничивает одновременные подключения
@@ -121,94 +123,156 @@ def generate_task_id() -> str:
 telethon_client = None
 
 
-async def get_telethon_client(task_id: str) -> TelegramClient:
-    """Получает или создает клиент Telethon для задачи"""
+async def get_telethon_client(task_id: str = None) -> TelegramClient:
+    """Получает или создает клиент Telethon с сохранением сессии"""
     global telethon_clients
 
-    client_num = hash(task_id) % MAX_CLIENTS
-    client_key = f"client_{client_num}"
-
-    if client_key not in telethon_clients or not telethon_clients[client_key].is_connected():
+    # Используем всегда один главный клиент
+    if not telethon_clients.get('main_client'):
         async with client_semaphore:
-            telethon_clients[client_key] = TelegramClient(
-                StringSession(),  # Используем StringSession для лучшей совместимости
+            # Используем SQLiteSession для сохранения авторизации между запусками
+            telethon_clients['main_client'] = TelegramClient(
+                SQLiteSession(SESSION_FILE),
                 API_ID,
                 API_HASH
             )
+
             try:
-                await telethon_clients[client_key].start(phone=PHONE_NUMBER)
-                logging.info(f"Создан клиент Telethon #{client_num}")
+                if not telethon_clients['main_client'].is_connected():
+                    await telethon_clients['main_client'].connect()
+
+                # Проверяем, авторизован ли клиент
+                if not await telethon_clients['main_client'].is_user_authorized():
+                    logging.info("Требуется авторизация в Telegram")
+                    await telethon_clients['main_client'].start(phone=PHONE_NUMBER)
+                    logging.info("Авторизация успешно выполнена")
+                else:
+                    logging.info("Клиент Telethon уже авторизован, используем существующую сессию")
+
             except Exception as e:
-                logging.error(f"Ошибка инициализации клиента #{client_num}: {e}")
+                logging.error(f"Ошибка инициализации клиента: {e}")
                 raise
 
-    return telethon_clients[client_key]
+    return telethon_clients['main_client']
 
 
 async def close_all_telethon_clients():
-    """Закрывает все клиенты Telethon"""
+    """Корректно закрывает все клиенты Telethon"""
     global telethon_clients
-    for client in telethon_clients.values():
+
+    for client_key, client in telethon_clients.items():
         try:
-            if client.is_connected():
+            if client and client.is_connected():
                 await client.disconnect()
+                logging.info(f"Клиент {client_key} отключен")
         except Exception as e:
-            logging.error(f"Ошибка при закрытии клиента: {e}")
+            logging.error(f"Ошибка при закрытии клиента {client_key}: {e}")
+
     telethon_clients = {}
 
 
 # Функция для поиска топиков в группе
 async def find_topics(group_username: str, task_id: str) -> Tuple[List[Dict], str]:
     """Поиск топиков с использованием выделенного клиента"""
-    client = await get_telethon_client(task_id)
     try:
-        entity = await client.get_entity(group_username)
+        client = await get_telethon_client(task_id)
+        logging.info(f"Поиск топиков для группы: @{group_username}")
 
-        # Проверяем, является ли чат форумом
-        if hasattr(entity, 'forum') and entity.forum:
-            try:
-                topics = await client(GetForumTopicsRequest(
-                    channel=entity,
-                    offset_date=0,
-                    offset_id=0,
-                    offset_topic=0,
-                    limit=100
-                ))
-                return [
-                    {"id": topic.id, "title": topic.title}
-                    for topic in topics.topics
-                ], ""
-            except Exception as e:
-                logging.warning(f"Альтернативный метод поиска топиков: {e}")
-                messages = await client(GetHistoryRequest(
-                    peer=entity,
-                    limit=100,
-                    offset_date=None,
-                    offset_id=0,
-                    max_id=0,
-                    min_id=0,
-                    add_offset=0,
-                    hash=0
-                ))
+        try:
+            # Проверяем, существует ли группа
+            entity = await client.get_entity(group_username)
+            logging.info(f"Сущность получена: {entity}")
 
-                topics = []
-                for msg in messages.messages:
-                    if hasattr(msg, 'reply_to') and hasattr(msg.reply_to, 'forum_topic'):
-                        topics.append({
-                            "id": msg.reply_to.reply_to_top_id,
-                            "title": getattr(msg, 'message', f"Топик {msg.reply_to.reply_to_top_id}")[:50]
-                        })
-                return topics, ""
-        return [{"id": 0, "title": "Общий чат"}], ""
+            # Проверяем, является ли чат форумом
+            if hasattr(entity, 'forum') and entity.forum:
+                try:
+                    logging.info("Попытка получить топики через GetForumTopicsRequest")
+                    topics = await client(GetForumTopicsRequest(
+                        channel=entity,
+                        offset_date=0,
+                        offset_id=0,
+                        offset_topic=0,
+                        limit=100
+                    ))
+
+                    if not topics or not topics.topics:
+                        logging.info("Топики не найдены через GetForumTopicsRequest")
+                        return [{"id": 0, "title": "Общий чат"}], ""
+
+                    logging.info(f"Найдено {len(topics.topics)} топиков")
+                    return [
+                        {"id": topic.id, "title": topic.title}
+                        for topic in topics.topics
+                    ], ""
+                except Exception as e:
+                    logging.warning(f"Ошибка при получении топиков через API форума: {e}")
+                    # Если не удалось получить через API форума, пробуем альтернативный метод
+                    logging.info("Использую альтернативный метод поиска топиков через историю сообщений")
+                    messages = await client(GetHistoryRequest(
+                        peer=entity,
+                        limit=100,
+                        offset_date=None,
+                        offset_id=0,
+                        max_id=0,
+                        min_id=0,
+                        add_offset=0,
+                        hash=0
+                    ))
+
+                    if not messages or not messages.messages:
+                        logging.info("Сообщения не найдены")
+                        return [{"id": 0, "title": "Общий чат"}], ""
+
+                    topics = []
+                    for msg in messages.messages:
+                        if hasattr(msg, 'reply_to') and hasattr(msg.reply_to, 'forum_topic'):
+                            topics.append({
+                                "id": msg.reply_to.reply_to_top_id,
+                                "title": getattr(msg, 'message', f"Топик {msg.reply_to.reply_to_top_id}")[:50]
+                            })
+
+                    if not topics:
+                        logging.info("Через историю сообщений топики не найдены")
+                        return [{"id": 0, "title": "Общий чат"}], ""
+
+                    logging.info(f"Найдено {len(topics)} топиков через историю")
+                    return topics, ""
+            else:
+                logging.info("Чат не является форумом, возвращаю общий чат")
+                return [{"id": 0, "title": "Общий чат"}], ""
+
+        except ChatAdminRequiredError:
+            logging.error("Требуются права администратора")
+            return [], "Ошибка: требуются права администратора для доступа к топикам"
+        except ChannelPrivateError:
+            logging.error("Канал/группа приватная или вы не являетесь участником")
+            return [], "Ошибка: канал приватный или вы не являетесь участником"
+        except Exception as e:
+            logging.error(f"Ошибка при получении сущности: {str(e)}")
+            return [], f"Ошибка: не удалось получить информацию о группе. Убедитесь, что вы правильно указали имя группы и являетесь её участником."
+
     except Exception as e:
+        logging.error(f"Общая ошибка в find_topics: {str(e)}")
         return [], f"Ошибка: {str(e)}"
 
+async def initialize_telethon_client() -> bool:
+    """Инициализирует главный Telethon-клиент при запуске бота"""
+    try:
+        client = await get_telethon_client()
+        me = await client.get_me()
+        logging.info(f"Успешно авторизован как {me.first_name} (@{me.username})")
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка инициализации Telethon: {e}")
+        return False
 
 # Отправка сообщения в группу
 async def send_message_to_topic(task_data: Dict) -> bool:
-    """Отправка сообщения с использованием выделенного клиента"""
-    client = await get_telethon_client(task_data['task_id'])
+    """Отправка сообщения с использованием главного клиента"""
     try:
+        # Используем главный клиент
+        client = await get_telethon_client()
+
         entity = await client.get_entity(task_data['group_username'])
 
         if task_data.get('photo_path'):
@@ -576,19 +640,35 @@ async def main():
         if group_username.startswith('@'):
             group_username = group_username[1:]
 
-        temp_task_id = f"temp_{time.time()}"
-        topics, error = await find_topics(group_username, temp_task_id)
+        await message.answer(f"🔍 Ищу топики в группе @{group_username}...")
 
-        if error:
-            await message.answer(f"Ошибка: {error}")
-            return
+        # Генерируем временный ID задачи
+        temp_task_id = f"temp_{int(time.time())}"
 
-        await state.update_data(group_username=group_username)
-        await PosterStates.selecting_topic.set()
-        await message.answer(
-            f"Найдено топиков: {len(topics)}",
-            reply_markup=get_topics_keyboard(topics)
-        )
+        try:
+            topics, error = await find_topics(group_username, temp_task_id)
+
+            if error:
+                await message.answer(
+                    f"❌ {error}\n\nПопробуйте другую группу или убедитесь, что у вас есть доступ к ней.")
+                return
+
+            if not topics:
+                await message.answer(
+                    "❌ Топики не найдены в этой группе. Возможно, это не форум или у вас нет прав доступа.")
+                return
+
+            await state.update_data(group_username=group_username)
+            await PosterStates.selecting_topic.set()
+
+            await message.answer(
+                f"✅ Найдено топиков: {len(topics)}",
+                reply_markup=get_topics_keyboard(topics)
+            )
+        except Exception as e:
+            logging.error(f"Ошибка при поиске топиков: {e}")
+            await message.answer(
+                f"❌ Произошла ошибка при поиске топиков: {str(e)}\n\nПопробуйте другую группу или сообщите разработчику.")
 
     # Обработчик выбора топика
     @dp.callback_query_handler(lambda c: c.data.startswith('topic_'), state=PosterStates.selecting_topic)
@@ -1139,13 +1219,19 @@ async def main():
 
     # Загружаем активные задачи при запуске бота
     try:
+        # Инициализируем Telethon клиент
+        logging.info("Инициализация Telethon клиента...")
+        if not await initialize_telethon_client():
+            logging.error("Не удалось инициализировать Telethon клиент. Перезапустите бота.")
+            return
+
         # Автозапуск задач
         config = load_config()
         for task_id, task_data in config.get('tasks', {}).items():
             if task_data.get('active'):
                 active_tasks[task_id] = True
                 asyncio.create_task(run_task(task_id, task_data, bot))
-                await asyncio.sleep(0.5)  # Задержка между запуском задач
+                await asyncio.sleep(0.5)  # Задержка между запуском задач # Задержка между запуском задач
 
         await dp.start_polling()
 
